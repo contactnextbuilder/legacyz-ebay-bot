@@ -1,0 +1,181 @@
+import discord
+import aiohttp
+import asyncio
+import base64
+import json
+import os
+from datetime import datetime
+
+# ============================================================
+# CONFIGURATION — Remplace les valeurs ci-dessous
+# ============================================================
+DISCORD_TOKEN = "TON_DISCORD_TOKEN"
+EBAY_APP_ID = "TON_EBAY_APP_ID"
+EBAY_CERT_ID = "TON_EBAY_CERT_ID"
+DISCORD_CHANNEL_ID = 1474452023075405834
+SEARCH_KEYWORD = "Club Legacyz"
+CHECK_INTERVAL = 300  # Vérifie toutes les 5 minutes
+# ============================================================
+
+# Couleurs des embeds
+COLOR_SOLD = 0x00C853      # Vert — Vente terminée
+COLOR_AUCTION = 0xFFD600   # Jaune — Enchère en cours
+COLOR_BUY_NOW = 0x2196F3   # Bleu — Buy It Now
+
+# Stockage des annonces déjà postées (évite les doublons)
+seen_items = set()
+
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+
+
+async def get_ebay_token():
+    """Obtenir un token OAuth eBay"""
+    credentials = base64.b64encode(f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers=headers,
+            data=data
+        ) as resp:
+            result = await resp.json()
+            return result.get("access_token")
+
+
+async def search_ebay(token, filter_type="ACTIVE"):
+    """Chercher des annonces eBay"""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_FR"
+    }
+    
+    params = {
+        "q": SEARCH_KEYWORD,
+        "limit": 20,
+    }
+    
+    if filter_type == "ACTIVE":
+        url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+    else:
+        # Ventes terminées
+        url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+        params["filter"] = "buyingOptions:{AUCTION|FIXED_PRICE},conditions:{USED|NEW}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            else:
+                print(f"Erreur eBay API: {resp.status}")
+                return None
+
+
+def build_embed(item, item_type):
+    """Construire un embed Discord pour une annonce"""
+    
+    title = item.get("title", "Annonce sans titre")
+    url = item.get("itemWebUrl", "")
+    price_info = item.get("price", {})
+    price = f"{price_info.get('value', '?')} {price_info.get('currency', 'EUR')}"
+    image_url = item.get("thumbnailImages", [{}])[0].get("imageUrl", None)
+    condition = item.get("condition", "Non précisé")
+    seller = item.get("seller", {}).get("username", "Vendeur inconnu")
+    
+    if item_type == "AUCTION":
+        color = COLOR_AUCTION
+        emoji = "🟡"
+        type_label = "ENCHÈRE EN COURS"
+        bid_count = item.get("bidCount", 0)
+        end_date = item.get("itemEndDate", "")
+        description = f"**Prix actuel :** {price}\n**Offres :** {bid_count}\n**Fin :** {end_date[:16].replace('T', ' ') if end_date else 'N/A'}"
+    elif item_type == "FIXED":
+        color = COLOR_BUY_NOW
+        emoji = "🔵"
+        type_label = "ACHAT IMMÉDIAT"
+        description = f"**Prix :** {price}"
+    else:
+        color = COLOR_SOLD
+        emoji = "🟢"
+        type_label = "VENDU"
+        description = f"**Prix de vente :** {price}"
+
+    embed = discord.Embed(
+        title=f"{emoji} {title}",
+        url=url,
+        description=description,
+        color=color,
+        timestamp=datetime.utcnow()
+    )
+    embed.set_author(name=f"eBay • {type_label}")
+    embed.add_field(name="Vendeur", value=seller, inline=True)
+    embed.add_field(name="État", value=condition, inline=True)
+    embed.add_field(name="🔗 Voir l'annonce", value=f"[Cliquer ici]({url})", inline=False)
+    
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+    
+    embed.set_footer(text="Legacyz eBay Tracker")
+    return embed
+
+
+async def check_ebay():
+    """Vérifier les nouvelles annonces et les poster sur Discord"""
+    await client.wait_until_ready()
+    channel = client.get_channel(DISCORD_CHANNEL_ID)
+    
+    if not channel:
+        print(f"Canal Discord introuvable : {DISCORD_CHANNEL_ID}")
+        return
+
+    print("Bot démarré — surveillance eBay active...")
+
+    while not client.is_closed():
+        try:
+            token = await get_ebay_token()
+            if not token:
+                print("Impossible d'obtenir le token eBay")
+                await asyncio.sleep(CHECK_INTERVAL)
+                continue
+
+            results = await search_ebay(token, "ACTIVE")
+            
+            if results and "itemSummaries" in results:
+                for item in results["itemSummaries"]:
+                    item_id = item.get("itemId")
+                    if item_id in seen_items:
+                        continue
+                    
+                    seen_items.add(item_id)
+                    buying_options = item.get("buyingOptions", [])
+                    
+                    if "AUCTION" in buying_options:
+                        item_type = "AUCTION"
+                    elif "FIXED_PRICE" in buying_options:
+                        item_type = "FIXED"
+                    else:
+                        item_type = "FIXED"
+                    
+                    embed = build_embed(item, item_type)
+                    await channel.send(embed=embed)
+                    await asyncio.sleep(1)  # Évite le spam
+
+        except Exception as e:
+            print(f"Erreur lors de la vérification eBay: {e}")
+
+        await asyncio.sleep(CHECK_INTERVAL)
+
+
+@client.event
+async def on_ready():
+    print(f"✅ Bot connecté : {client.user}")
+    client.loop.create_task(check_ebay())
+
+
+client.run(DISCORD_TOKEN)
