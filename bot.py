@@ -2,16 +2,15 @@ import discord
 import aiohttp
 import asyncio
 import base64
-import json
 import os
 from datetime import datetime
 
 # ============================================================
-# CONFIGURATION — Remplace les valeurs ci-dessous
+# CONFIGURATION — Variables d'environnement Railway
 # ============================================================
-DISCORD_TOKEN = "TON_DISCORD_TOKEN"
-EBAY_APP_ID = "TON_EBAY_APP_ID"
-EBAY_CERT_ID = "TON_EBAY_CERT_ID"
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+EBAY_APP_ID = os.environ.get("EBAY_APP_ID")
+EBAY_CERT_ID = os.environ.get("EBAY_CERT_ID")
 DISCORD_CHANNEL_ID = 1474452023075405834
 SEARCH_KEYWORD = "Club Legacyz"
 CHECK_INTERVAL = 300  # Vérifie toutes les 5 minutes
@@ -48,8 +47,8 @@ async def get_ebay_token():
             return result.get("access_token")
 
 
-async def search_ebay(token, filter_type="ACTIVE"):
-    """Chercher des annonces eBay"""
+async def search_ebay(token):
+    """Chercher des annonces eBay actives"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -60,20 +59,15 @@ async def search_ebay(token, filter_type="ACTIVE"):
         "q": SEARCH_KEYWORD,
         "limit": 20,
     }
-    
-    if filter_type == "ACTIVE":
-        url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
-    else:
-        # Ventes terminées
-        url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
-        params["filter"] = "buyingOptions:{AUCTION|FIXED_PRICE},conditions:{USED|NEW}"
+
+    url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
             if resp.status == 200:
                 return await resp.json()
             else:
-                print(f"Erreur eBay API: {resp.status}")
+                print(f"Erreur eBay API: {resp.status} - {await resp.text()}")
                 return None
 
 
@@ -84,7 +78,7 @@ def build_embed(item, item_type):
     url = item.get("itemWebUrl", "")
     price_info = item.get("price", {})
     price = f"{price_info.get('value', '?')} {price_info.get('currency', 'EUR')}"
-    image_url = item.get("thumbnailImages", [{}])[0].get("imageUrl", None)
+    image_url = item.get("thumbnailImages", [{}])[0].get("imageUrl", None) if item.get("thumbnailImages") else None
     condition = item.get("condition", "Non précisé")
     seller = item.get("seller", {}).get("username", "Vendeur inconnu")
     
@@ -144,7 +138,7 @@ async def check_ebay():
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
 
-            results = await search_ebay(token, "ACTIVE")
+            results = await search_ebay(token)
             
             if results and "itemSummaries" in results:
                 for item in results["itemSummaries"]:
@@ -157,14 +151,12 @@ async def check_ebay():
                     
                     if "AUCTION" in buying_options:
                         item_type = "AUCTION"
-                    elif "FIXED_PRICE" in buying_options:
-                        item_type = "FIXED"
                     else:
                         item_type = "FIXED"
                     
                     embed = build_embed(item, item_type)
                     await channel.send(embed=embed)
-                    await asyncio.sleep(1)  # Évite le spam
+                    await asyncio.sleep(1)
 
         except Exception as e:
             print(f"Erreur lors de la vérification eBay: {e}")
