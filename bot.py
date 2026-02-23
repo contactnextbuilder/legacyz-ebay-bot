@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from onboarding import send_onboarding, ROLE_FR, ROLE_EN
 
 # ============================================================
-# CONFIGURATION — Variables d'environnement Railway
+# CONFIGURATION
 # ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 EBAY_APP_ID = os.environ.get("EBAY_APP_ID")
@@ -21,8 +21,8 @@ COLOR_SOLD = 0x00C853
 COLOR_AUCTION = 0xFFD600
 COLOR_BUY_NOW = 0x2196F3
 
-seen_items = set()
-seen_sold_items = set()
+seen_active = set()
+seen_sold = set()
 
 intents = discord.Intents.default()
 intents.members = True
@@ -46,14 +46,17 @@ async def get_ebay_token():
             return result.get("access_token")
 
 
-async def search_ebay_active(token):
-    """Annonces actives via Browse API"""
+async def search_ebay(token, filter_str=None):
+    """Recherche eBay via Browse API"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_FR"
     }
     params = {"q": SEARCH_KEYWORD, "limit": 20}
+    if filter_str:
+        params["filter"] = filter_str
+
     url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
@@ -64,30 +67,7 @@ async def search_ebay_active(token):
                 return None
 
 
-async def search_ebay_sold():
-    """Ventes terminées via Finding API"""
-    url = "https://svcs.ebay.com/services/search/FindingService/v1"
-    params = {
-        "OPERATION-NAME": "findCompletedItems",
-        "SERVICE-VERSION": "1.0.0",
-        "SECURITY-APPNAME": EBAY_APP_ID,
-        "RESPONSE-DATA-FORMAT": "JSON",
-        "keywords": SEARCH_KEYWORD,
-        "itemFilter(0).name": "SoldItemsOnly",
-        "itemFilter(0).value": "true",
-        "paginationInput.entriesPerPage": "10",
-        "sortOrder": "EndTimeSoonest"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            else:
-                print(f"Erreur eBay Finding API: {resp.status}")
-                return None
-
-
-def build_embed_active(item, item_type):
+def build_embed(item, item_type):
     title = item.get("title", "Annonce sans titre")
     url = item.get("itemWebUrl", "")
     price_info = item.get("price", {})
@@ -96,7 +76,12 @@ def build_embed_active(item, item_type):
     condition = item.get("condition", "Non précisé")
     seller = item.get("seller", {}).get("username", "Vendeur inconnu")
 
-    if item_type == "AUCTION":
+    if item_type == "SOLD":
+        color = COLOR_SOLD
+        emoji = "🟢"
+        type_label = "VENDU ✅"
+        description = f"**Prix de vente final :** {price}"
+    elif item_type == "AUCTION":
         color = COLOR_AUCTION
         emoji = "🟡"
         type_label = "ENCHÈRE EN COURS"
@@ -126,81 +111,53 @@ def build_embed_active(item, item_type):
     return embed
 
 
-def build_embed_sold(item):
-    """Construit l'embed pour une vente terminée"""
-    title = item.get("title", ["Annonce sans titre"])[0]
-    url = item.get("viewItemURL", [""])[0]
-    price = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0].get("__value__", "?")
-    currency = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0].get("@currencyId", "EUR")
-    bid_count = item.get("sellingStatus", [{}])[0].get("bidCount", ["0"])[0]
-    end_time = item.get("listingInfo", [{}])[0].get("endTime", [""])[0]
-    seller = item.get("sellerInfo", [{}])[0].get("sellerUserName", ["Inconnu"])[0]
-    image_url = item.get("galleryURL", [None])[0]
-
-    end_display = end_time[:16].replace("T", " ") if end_time else "N/A"
-
-    embed = discord.Embed(
-        title=f"🟢 {title}",
-        url=url,
-        description=f"**Prix de vente final :** {price} {currency}\n**Nombre d'offres :** {bid_count}\n**Vendu le :** {end_display}",
-        color=COLOR_SOLD,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_author(name="eBay • VENDU ✅")
-    embed.add_field(name="Vendeur", value=seller, inline=True)
-    embed.add_field(name="🔗 Voir l'annonce", value=f"[Cliquer ici]({url})", inline=False)
-    if image_url:
-        embed.set_thumbnail(url=image_url)
-    embed.set_footer(text="Legacyz eBay Tracker — Référence marché")
-    return embed
-
-
 async def check_ebay():
     await client.wait_until_ready()
     channel = client.get_channel(DISCORD_CHANNEL_ID)
     if not channel:
-        print(f"Canal Discord introuvable : {DISCORD_CHANNEL_ID}")
+        print(f"Canal introuvable : {DISCORD_CHANNEL_ID}")
         return
 
-    print("Bot démarré — surveillance eBay active (annonces + ventes terminées)...")
+    print("Bot démarré — surveillance eBay active...")
 
     while not client.is_closed():
         try:
             token = await get_ebay_token()
+            if not token:
+                await asyncio.sleep(CHECK_INTERVAL)
+                continue
 
-            # --- Annonces actives ---
-            if token:
-                results = await search_ebay_active(token)
-                if results and "itemSummaries" in results:
-                    for item in results["itemSummaries"]:
-                        item_id = item.get("itemId")
-                        if item_id in seen_items:
-                            continue
-                        seen_items.add(item_id)
-                        buying_options = item.get("buyingOptions", [])
-                        item_type = "AUCTION" if "AUCTION" in buying_options else "FIXED"
-                        embed = build_embed_active(item, item_type)
-                        await channel.send(embed=embed)
-                        await asyncio.sleep(1)
+            # Annonces actives
+            active = await search_ebay(token)
+            if active and "itemSummaries" in active:
+                for item in active["itemSummaries"]:
+                    item_id = item.get("itemId")
+                    if item_id in seen_active:
+                        continue
+                    seen_active.add(item_id)
+                    buying_options = item.get("buyingOptions", [])
+                    item_type = "AUCTION" if "AUCTION" in buying_options else "FIXED"
+                    await channel.send(embed=build_embed(item, item_type))
+                    await asyncio.sleep(1)
 
-            # --- Ventes terminées ---
-            sold_results = await search_ebay_sold()
-            if sold_results:
-                try:
-                    items = sold_results["findCompletedItemsResponse"][0]["searchResult"][0].get("item", [])
-                    for item in items:
-                        item_id = item.get("itemId", [""])[0]
-                        if item_id in seen_sold_items:
-                            continue
-                        seen_sold_items.add(item_id)
-                        embed = build_embed_sold(item)
-                        await channel.send(embed=embed)
-                        await asyncio.sleep(1)
-                except (KeyError, IndexError) as e:
-                    print(f"Erreur parsing ventes terminées: {e}")
+            # Ventes terminées via Browse API
+            sold = await search_ebay(token, "buyingOptions:{FIXED_PRICE|AUCTION},conditions:{USED|NEW},itemLocationCountry:FR")
+            if sold and "itemSummaries" in sold:
+                for item in sold["itemSummaries"]:
+                    item_id = item.get("itemId")
+                    if item_id in seen_sold or item_id in seen_active:
+                        continue
+                    # Vérifier si la vente est terminée via le champ additionalImages ou itemEndDate
+                    end_date = item.get("itemEndDate", "")
+                    if end_date:
+                        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                        if end_dt < datetime.now(timezone.utc):
+                            seen_sold.add(item_id)
+                            await channel.send(embed=build_embed(item, "SOLD"))
+                            await asyncio.sleep(1)
 
         except Exception as e:
-            print(f"Erreur générale eBay: {e}")
+            print(f"Erreur eBay: {e}")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
