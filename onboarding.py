@@ -7,7 +7,7 @@ import os
 ROLE_FR = "Membre Legacyz"
 ROLE_EN = "Legacyz International"
 CHANNEL_LOUNGE_FR = 1361686684911141087
-CHANNEL_LOUNGE_EN = 1475474889828864020
+CHANNEL_LOUNGE_EN = 1397117269024440351  # world-lounge
 
 # ============================================================
 # TEXTE ONBOARDING FR
@@ -271,4 +271,3 @@ async def send_onboarding(member, role_name, client):
         await channel.send(welcome_msg)
     else:
         print(f"Canal introuvable : {channel_id}")
-
