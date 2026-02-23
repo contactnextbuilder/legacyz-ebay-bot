@@ -3,7 +3,7 @@ import aiohttp
 import asyncio
 import base64
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from onboarding import send_onboarding, ROLE_FR, ROLE_EN
 
 # ============================================================
@@ -114,7 +114,7 @@ def build_embed_active(item, item_type):
         url=url,
         description=description,
         color=color,
-        timestamp=datetime.now(datetime.UTC)
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_author(name=f"eBay • {type_label}")
     embed.add_field(name="Vendeur", value=seller, inline=True)
@@ -144,7 +144,7 @@ def build_embed_sold(item):
         url=url,
         description=f"**Prix de vente final :** {price} {currency}\n**Nombre d'offres :** {bid_count}\n**Vendu le :** {end_display}",
         color=COLOR_SOLD,
-        timestamp=datetime.now(datetime.UTC)
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_author(name="eBay • VENDU ✅")
     embed.add_field(name="Vendeur", value=seller, inline=True)
